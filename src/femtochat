@@ -1,0 +1,217 @@
+#!/usr/bin/env python
+
+import re
+from asyncio import open_connection
+from sys import argv
+
+from rich.syntax import Syntax
+from textual import on, work
+from textual.app import App, ComposeResult
+from textual.containers import Horizontal
+from textual.widgets import (
+    Footer, Header, Input, Label, RichLog, LoadingIndicator )
+
+
+class Femtochat(App):
+    CSS = """
+	Header {
+		text-style: bold;
+		background: $primary;
+	}
+
+	RichLog {
+		height: 1fr;
+		background: $panel;
+		padding: 1;
+	}
+
+	LoadingIndicator {
+		height: 1fr;
+		background: $surface;
+	}
+
+	Input {
+		height: 3;
+		width: 7fr;
+		background: $surface;
+	}
+
+	Input:focus {
+		border: solid $accent;
+	}
+
+	Label {
+		content-align: center middle;
+		text-style: bold;
+		height: 3;
+		background: $foreground;
+		color: $secondary;
+		margin: 0 1 0 0;
+	}
+
+	Horizontal {
+		height: 5;
+		padding: 1;
+		background: $secondary;
+	}
+
+	Footer {
+		text-style: bold;
+		background: $primary;
+	}"""
+
+    def __init__(self, nick: str, server: str="localhost", port: int=44322):
+        super().__init__()
+        self.nick = nick
+        self.server = server
+        self.port = int(port)
+        self.last_id = 0
+        self.title = "femtochat"
+        self.sub_title = f"{self.nick}@{self.server}:{self.port}"
+
+    def compose(self) -> ComposeResult:
+        self.label = Label(f"{self.nick}:")
+        self.label.styles.width = f"{len(self.nick)+5}"
+
+        yield LoadingIndicator()
+        yield Header(show_clock=True, icon="փ", time_format='%I:%M %p')
+        yield RichLog(id="chat", wrap=True, highlight=True, markup=True, min_width=80)
+        with Horizontal():
+            yield self.label
+            yield Input(placeholder="Type message or command...", id="input")
+        yield Footer()
+        
+    async def on_mount(self) -> None:
+        self.query_one(LoadingIndicator).display = False
+        self.query_one(RichLog).display = False
+        self.load_backlog_worker(1000)
+
+    async def on_ready(self) -> None:
+        chat = self.query_one(RichLog)
+        chat.scroll_end()
+        chat.display = True
+        self.query_one(LoadingIndicator).display = False             
+        self.query_one(Input).focus()        
+
+    @work
+    async def load_backlog_worker(self, n: int) -> None:
+        reader, writer = await open_connection(self.server, self.port)
+        writer.write(f"LAST {n}\n".encode('utf-8'))
+        await writer.drain()
+        n_lines_str = (await reader.readline()).decode('utf-8').strip()
+        n_lines = int(n_lines_str)
+        lines = []
+        for _ in range(n_lines):
+            line = (await reader.readline()).decode('utf-8')
+            lines.append(line)
+        new_id_str = (await reader.readline()).decode('utf-8').strip()
+        new_id = int(new_id_str)
+        writer.close()
+        await writer.wait_closed()
+        chat = self.query_one(RichLog)
+        for line in lines:
+            line = line.rstrip()
+            match = re.match(r'^(.+?):(\s+)(.*)$', line)
+            if match:
+                nick, space, msg = match.groups()
+                chat.write(f"\n[bold underline]{nick}:[/]{space}")
+                chat.write(Syntax(f"    {msg}", "uxntal", word_wrap=True))
+            else:
+                chat.write(f"\n[yellow]• {line}[/]")
+        self.last_id = new_id
+
+    @work
+    async def poll_worker(self) -> None:
+        reader, writer = await open_connection(self.server, self.port)
+        writer.write(f"POLL {self.last_id}\n".encode('utf-8'))
+        await writer.drain()
+        new_count_str = (await reader.readline()).decode('utf-8').strip()
+        new_count = int(new_count_str)
+        writer.close()
+        await writer.wait_closed()
+        if new_count > 0:
+            await self.load_backlog_worker(new_count)
+
+    @work
+    async def send_worker(self, message: str) -> int:
+        reader, writer = await open_connection(self.server, self.port)
+        writer.write(f"SEND {message}\n".encode('utf-8'))
+        await writer.drain()
+        msg_id_str = (await reader.readline()).decode('utf-8').strip()
+        msg_id = int(msg_id_str)
+        writer.close()
+        await writer.wait_closed()
+        return msg_id
+
+    @work
+    async def stat_worker(self) -> str:
+        reader, writer = await open_connection(self.server, self.port)
+        writer.write(b"STAT\n")
+        await writer.drain()
+        lines = []
+        for _ in range(3):
+            line = (await reader.readline()).decode('utf-8').rstrip('\n')
+            lines.append(line)
+        writer.close()
+        await writer.wait_closed()
+        return '\n'.join(lines)
+
+    @work
+    async def quit_worker(self) -> None:
+        reader, writer = await open_connection(self.server, self.port)
+        writer.write(b"QUIT\n")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    @on(Input.Submitted)
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        text = event.input.value
+        event.input.value = ""
+        if len(text) == 0:
+            self.poll_worker()
+        elif text.startswith('/nick '):
+            self.nick = text[5:].strip()
+            self.sub_title = f"{self.nick}@{self.server}:{self.port}"
+            self.label.update(f"{self.nick}:")
+            self.label.styles.width = f"{len(self.nick)+5}"
+        elif text.startswith('/stat'):
+            worker = self.stat_worker()
+            await worker.wait()
+            info = worker.result
+            self.notify(info, title="Server Stats")
+        elif text.startswith('/quit'):
+            worker = self.quit_worker()
+            await worker.wait()
+            self.exit()
+        elif text.startswith('/me'):
+            message = f"{self.nick} {text[3:].strip()}"
+            worker = self.send_worker(message)
+            await worker.wait()
+            msg_id = worker.result
+            self.last_id = msg_id
+            self.load_backlog_worker(1)
+        else:
+            message = f"{self.nick}: {text}"
+            worker = self.send_worker(message)
+            await worker.wait()
+            msg_id = worker.result
+            self.last_id = msg_id            
+            self.load_backlog_worker(1)
+
+
+if __name__ == '__main__':
+    nargs = len(argv)
+    if nargs == 2:
+        nick = argv[1]
+        app = Femtochat(nick)
+    elif nargs == 3:
+        nick, server = argv[1:]
+        app = Femtochat(nick, server)
+    elif nargs == 4:
+        name, server, port = argv[1:]
+        app = Femtochat(name, server, port)
+    else:
+        print("usage:\n\t$ femtochat nick [server] [port]")
+        exit()
+    app.run()

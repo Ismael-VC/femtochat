@@ -1,0 +1,45 @@
+Header {
+	text-style: bold;
+	background: $primary;
+}
+
+RichLog {
+	height: 1fr;
+	background: $panel;
+	padding: 1;
+}
+
+LoadingIndicator {
+	height: 1fr;
+	background: $surface;
+}
+
+Input {
+	height: 3;
+	width: 7fr;
+	background: $surface;
+}
+
+Input:focus {
+	border: solid $accent;
+}
+
+Label {
+	content-align: center middle;
+	text-style: bold;
+	height: 3;
+	background: $foreground;
+	color: $secondary;
+	margin: 0 1 0 0;
+}
+
+Horizontal {
+	height: 5;
+	padding: 1;
+	background: $secondary;
+}
+
+Footer {
+	text-style: bold;
+	background: $primary;
+}
